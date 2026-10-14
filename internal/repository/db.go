@@ -85,12 +85,13 @@ func loyalsoldierPresets() []*model.RuleProvider {
 	cdnBase := "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/"
 	mkRP := func(name, behavior string) *model.RuleProvider {
 		return &model.RuleProvider{
-			UserID:    nil,
-			Name:      name,
-			Type:      "http",
-			URL:       cdnBase + name + ".txt",
-			Behavior:  behavior,
-			Format:    "text",
+			UserID:   nil,
+			Name:     name,
+			Type:     "http",
+			URL:      cdnBase + name + ".txt",
+			Behavior: behavior,
+			// 上游 .txt 文件实际包含 YAML payload，不能按扩展名设置为 text。
+			Format:    "yaml",
 			Interval:  86400,
 			IsPreset:  true,
 			PresetTag: "loyalsoldier",
