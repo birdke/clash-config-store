@@ -28,7 +28,15 @@ import {
   formToProxyNode,
   proxyToYaml,
   yamlToProxy,
+  validateProxyForm,
 } from './proxy-form'
+import {
+  getVlessUriErrorCode,
+  parseVlessUri,
+  SUPPORTED_VLESS_CLIENT_FINGERPRINTS,
+  VLESS_DEFAULT_ENCRYPTION,
+} from './vless-uri'
+import type { VlessUriErrorCode } from './vless-uri'
 
 // ─────────────────────────────────────────────
 // 内部组件：代理节点编辑弹窗
@@ -46,6 +54,9 @@ export function ProxyDialog({ open, initialNode, onClose, onSave }: ProxyDialogP
   const [form, setForm] = useState<ProxyFormState>(defaultProxyForm)
   // 是否显示 YAML 编辑模式
   const [yamlMode, setYamlMode] = useState(false)
+  // 添加节点时的本地 VLESS URI 草稿；不写入存储或日志
+  const [vlessUri, setVlessUri] = useState('')
+  const [vlessUriError, setVlessUriError] = useState<VlessUriErrorCode | null>(null)
 
   // 打开/初始化时重置表单
   useEffect(() => {
@@ -54,14 +65,62 @@ export function ProxyDialog({ open, initialNode, onClose, onSave }: ProxyDialogP
         setForm(proxyNodeToForm(initialNode))
         setYamlMode(initialNode.type === 'custom')
       } else {
-        setForm(defaultProxyForm)
+        setForm({ ...defaultProxyForm, preservedFields: {} })
         setYamlMode(false)
       }
+      setVlessUri('')
+      setVlessUriError(null)
+    } else {
+      setVlessUri('')
+      setVlessUriError(null)
     }
   }, [open, initialNode])
 
   const set = <K extends keyof ProxyFormState>(key: K, val: ProxyFormState[K]) =>
     setForm((prev) => ({ ...prev, [key]: val }))
+
+  const changeProxyType = (type: ProxyProtocol) => {
+    setForm((prev) => {
+      if (type === prev.type) return prev
+      if (type === 'vless') {
+        return {
+          ...prev,
+          type,
+          preservedRealityFields: {},
+          preservedFields: {},
+          originalNetwork: 'tcp',
+          encryption: VLESS_DEFAULT_ENCRYPTION,
+          realityEnabled: false,
+          realityPublicKey: '',
+          realityShortId: '',
+        }
+      }
+      return {
+        ...prev,
+        type,
+        preservedRealityFields: {},
+        preservedFields: {},
+        realityEnabled: false,
+        realityPublicKey: '',
+        realityShortId: '',
+      }
+    })
+    if (type === 'custom') setYamlMode(true)
+  }
+
+  const parsePastedVlessUri = () => {
+    try {
+      const node = parseVlessUri(vlessUri)
+      setForm(proxyNodeToForm(node))
+      setYamlMode(false)
+      setVlessUriError(null)
+      toast.success(t('customConfigs.vlessUriParsed'))
+    } catch (error) {
+      const code = getVlessUriErrorCode(error)
+      setVlessUriError(code)
+      toast.error(t(`customConfigs.vlessUriErrors.${code}`))
+    }
+  }
 
   // 切换到 YAML 模式：先把当前表单序列化
   const switchToYaml = () => {
@@ -78,11 +137,17 @@ export function ProxyDialog({ open, initialNode, onClose, onSave }: ProxyDialogP
   const switchToForm = () => {
     try {
       const parsed = yamlToProxy(form.rawYaml)
-      const newType = (parsed.type as ProxyProtocol) || form.type
+      const parsedType = parsed.type as string
+      if (!PROXY_PROTOCOLS.includes(parsedType as ProxyProtocol)) {
+        toast.error(t('customConfigs.yamlUnsupportedType'))
+        return
+      }
+      const newType = parsedType as ProxyProtocol
       const reconstructed: ProxyNode = { name: form.name, type: newType, ...parsed }
       setForm(proxyNodeToForm(reconstructed))
     } catch {
-      toast.error('YAML 解析失败，请检查格式')
+      toast.error(t('customConfigs.yamlParseError'))
+      return
     }
     setYamlMode(false)
   }
@@ -92,14 +157,26 @@ export function ProxyDialog({ open, initialNode, onClose, onSave }: ProxyDialogP
       toast.error(t('customConfigs.proxyName') + ' ' + t('common.required'))
       return
     }
+    if (!yamlMode) {
+      const vlessValidationError = validateProxyForm(form)
+      if (vlessValidationError) {
+        toast.error(t(`customConfigs.vlessUriErrors.${vlessValidationError}`))
+        return
+      }
+    }
     let node: ProxyNode
     if (yamlMode) {
       // YAML 模式下直接解析
-      const parsed = yamlToProxy(form.rawYaml)
-      node = {
-        name: form.name,
-        type: (parsed.type as string) || form.type,
-        ...parsed,
+      try {
+        const parsed = yamlToProxy(form.rawYaml)
+        node = {
+          name: form.name,
+          type: parsed.type as string,
+          ...parsed,
+        }
+      } catch {
+        toast.error(t('customConfigs.yamlParseError'))
+        return
       }
     } else {
       node = formToProxyNode(form)
@@ -209,6 +286,10 @@ export function ProxyDialog({ open, initialNode, onClose, onSave }: ProxyDialogP
     }
 
     if (type === 'vless') {
+      const fingerprintOptions = form.clientFingerprint &&
+        !(SUPPORTED_VLESS_CLIENT_FINGERPRINTS as readonly string[]).includes(form.clientFingerprint)
+        ? [form.clientFingerprint, ...SUPPORTED_VLESS_CLIENT_FINGERPRINTS]
+        : SUPPORTED_VLESS_CLIENT_FINGERPRINTS
       return (
         <>
           {commonFields}
@@ -226,7 +307,26 @@ export function ProxyDialog({ open, initialNode, onClose, onSave }: ProxyDialogP
               </NativeSelect>
             </div>
             <div className="flex items-center gap-2 pt-6">
-              <Checkbox id="vless-tls" checked={form.tls} onCheckedChange={(v) => set('tls', !!v)} />
+              <Checkbox
+                id="vless-tls"
+                checked={form.tls}
+                onCheckedChange={(v) => {
+                  const enabled = !!v
+                  setForm((prev) => ({
+                    ...prev,
+                    tls: enabled,
+                    ...(enabled
+                      ? {}
+                      : {
+                          servername: '',
+                          clientFingerprint: '',
+                          realityEnabled: false,
+                          realityPublicKey: '',
+                          realityShortId: '',
+                        }),
+                  }))
+                }}
+              />
               <label htmlFor="vless-tls" className="text-sm cursor-pointer">TLS</label>
             </div>
           </div>
@@ -234,6 +334,71 @@ export function ProxyDialog({ open, initialNode, onClose, onSave }: ProxyDialogP
             <Label>Flow <span className="text-xs text-muted-foreground">({t('common.optional')})</span></Label>
             <Input value={form.flow} onChange={(e) => set('flow', e.target.value)} placeholder="xtls-rprx-vision" />
           </div>
+          <div className="space-y-1">
+            <Label>{t('customConfigs.vlessEncryption')}</Label>
+            <NativeSelect value={form.encryption} onChange={(e) => set('encryption', e.target.value)}>
+              {form.encryption !== VLESS_DEFAULT_ENCRYPTION && (
+                <NativeSelectOption value={form.encryption}>{form.encryption}</NativeSelectOption>
+              )}
+              <NativeSelectOption value={VLESS_DEFAULT_ENCRYPTION}>{VLESS_DEFAULT_ENCRYPTION}</NativeSelectOption>
+            </NativeSelect>
+          </div>
+          {(form.tls || form.realityEnabled) && (
+            <>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <Label>{t('customConfigs.vlessServername')} <span className="text-xs text-muted-foreground">({t('common.optional')})</span></Label>
+                  <Input value={form.servername} onChange={(e) => set('servername', e.target.value)} />
+                </div>
+                <div className="space-y-1">
+                  <Label>{t('customConfigs.vlessClientFingerprint')} <span className="text-xs text-muted-foreground">({t('common.optional')})</span></Label>
+                  <NativeSelect value={form.clientFingerprint} onChange={(e) => set('clientFingerprint', e.target.value)}>
+                    <NativeSelectOption value="">{t('common.optional')}</NativeSelectOption>
+                    {fingerprintOptions.map((fingerprint) => (
+                      <NativeSelectOption key={fingerprint} value={fingerprint}>{fingerprint}</NativeSelectOption>
+                    ))}
+                  </NativeSelect>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="vless-reality"
+                  checked={form.realityEnabled}
+                  onCheckedChange={(v) => {
+                    const enabled = !!v
+                    setForm((prev) => ({
+                      ...prev,
+                      realityEnabled: enabled,
+                      ...(enabled ? {} : { realityPublicKey: '', realityShortId: '' }),
+                    }))
+                  }}
+                />
+                <label htmlFor="vless-reality" className="text-sm cursor-pointer">
+                  {t('customConfigs.vlessReality')}
+                </label>
+              </div>
+              {form.realityEnabled && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <Label>{t('customConfigs.vlessRealityPublicKey')}</Label>
+                    <Input
+                      value={form.realityPublicKey}
+                      onChange={(e) => set('realityPublicKey', e.target.value)}
+                      className="font-mono text-xs"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label>{t('customConfigs.vlessRealityShortId')}</Label>
+                    <Input
+                      value={form.realityShortId}
+                      onChange={(e) => set('realityShortId', e.target.value)}
+                      className="font-mono text-xs"
+                    />
+                  </div>
+                </div>
+              )}
+            </>
+          )}
         </>
       )
     }
@@ -410,6 +575,33 @@ export function ProxyDialog({ open, initialNode, onClose, onSave }: ProxyDialogP
             />
           </div>
 
+          {!initialNode && (
+            <div className="space-y-2 rounded-md border border-dashed p-3">
+              <Label>{t('customConfigs.vlessUriLabel')}</Label>
+              <Textarea
+                value={vlessUri}
+                onChange={(e) => {
+                  setVlessUri(e.target.value)
+                  if (vlessUriError) setVlessUriError(null)
+                }}
+                placeholder="vless://uuid@example.com:443?..."
+                className="font-mono text-xs min-h-[84px]"
+                aria-label={t('customConfigs.vlessUriLabel')}
+              />
+              <div className="flex items-center gap-2">
+                <Button type="button" variant="outline" size="sm" onClick={parsePastedVlessUri}>
+                  {t('customConfigs.parseVlessUri')}
+                </Button>
+                <span className="text-xs text-muted-foreground">{t('customConfigs.vlessUriLocalOnly')}</span>
+              </div>
+              {vlessUriError && (
+                <p role="alert" className="text-sm text-destructive">
+                  {t(`customConfigs.vlessUriErrors.${vlessUriError}`)}
+                </p>
+              )}
+            </div>
+          )}
+
           {/* 协议类型（YAML 模式下仍可见） */}
           {!yamlMode && (
             <div className="space-y-1">
@@ -418,8 +610,7 @@ export function ProxyDialog({ open, initialNode, onClose, onSave }: ProxyDialogP
                 value={form.type}
                 onChange={(e) => {
                   const v = e.target.value as ProxyProtocol
-                  set('type', v)
-                  if (v === 'custom') setYamlMode(true)
+                  changeProxyType(v)
                 }}
               >
                 {PROXY_PROTOCOLS.map((p) => (

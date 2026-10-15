@@ -1,42 +1,61 @@
 import type { ProxyNode, ProxyGroup } from '@/types'
 import { hasProxyOrGroupNameConflict } from '@/lib/rename-refs'
+import { dump, FAILSAFE_SCHEMA, JSON_SCHEMA, load } from 'js-yaml'
+import {
+  VLESS_DEFAULT_ENCRYPTION,
+  validateVlessFields,
+} from './vless-uri'
+import type { VlessUriErrorCode } from './vless-uri'
 
 // ─────────────────────────────────────────────
 // 工具函数：简单对象 <-> YAML 字符串互转
 // ─────────────────────────────────────────────
 
-/** 将代理节点对象序列化为简单 YAML 字符串 */
-export function proxyToYaml(proxy: Record<string, unknown>): string {
-  const lines: string[] = []
-  for (const [key, val] of Object.entries(proxy)) {
-    if (key === '__raw__') continue
-    if (val === undefined || val === null) continue
-    if (typeof val === 'boolean') {
-      lines.push(`${key}: ${val}`)
-    } else if (typeof val === 'number') {
-      lines.push(`${key}: ${val}`)
-    } else if (typeof val === 'string') {
-      if (val === '') continue
-      // 含特殊字符时加引号
-      if (/[:#{}[\]|>&*!,?]/.test(val) || val.includes('\n')) {
-        lines.push(`${key}: "${val.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`)
-      } else {
-        lines.push(`${key}: ${val}`)
-      }
-    } else if (Array.isArray(val)) {
-      if (val.length === 0) {
-        lines.push(`${key}: []`)
-      } else {
-        lines.push(`${key}:`)
-        for (const item of val) {
-          lines.push(`  - ${item}`)
-        }
-      }
-    } else if (typeof val === 'object') {
-      lines.push(`${key}: ${JSON.stringify(val)}`)
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function cloneValue<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((item) => cloneValue(item)) as T
+  if (isRecord(value)) {
+    const cloned: Record<string, unknown> = {}
+    for (const [key, item] of Object.entries(value)) cloned[key] = cloneValue(item)
+    return cloned as T
+  }
+  return value
+}
+
+function restoreShortIdStrings(value: unknown, lexical: unknown): unknown {
+  if (Array.isArray(value)) {
+    const lexicalItems = Array.isArray(lexical) ? lexical : []
+    return value.map((item, index) => restoreShortIdStrings(item, lexicalItems[index]))
+  }
+  if (!isRecord(value)) return value
+  const lexicalRecord = isRecord(lexical) ? lexical : {}
+  const restored: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(value)) {
+    if (key === 'short-id' && Object.prototype.hasOwnProperty.call(lexicalRecord, key)) {
+      restored[key] = String(lexicalRecord[key])
+    } else {
+      restored[key] = restoreShortIdStrings(item, lexicalRecord[key])
     }
   }
-  return lines.join('\n')
+  return restored
+}
+
+/** 将代理节点对象序列化为安全的 YAML 字符串，支持任意嵌套字段。 */
+export function proxyToYaml(proxy: Record<string, unknown>): string {
+  const serializable: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(proxy)) {
+    if (key !== '__raw__' && value !== undefined && value !== null) {
+      serializable[key] = cloneValue(value)
+    }
+  }
+  return dump(serializable, {
+    schema: JSON_SCHEMA,
+    noRefs: true,
+    lineWidth: -1,
+  }).trimEnd()
 }
 
 /** 与 proxyToYaml 一致的标量引号规则，用于补丁替换 YAML 中的 name 行 */
@@ -52,52 +71,25 @@ export function replaceProxyYamlNameLine(rawYaml: string, newName: string): stri
   return rawYaml.replace(/^(\s*(?:-\s+)?name:\s*)(.+)$/m, (_, p1: string) => `${p1}${yamlScalarForProxyName(newName)}`)
 }
 
-/** 将简单 YAML 字符串解析为对象（仅支持扁平结构和一级数组） */
+/** 将代理节点 YAML 安全解析为对象，保留嵌套 Reality/transport 字段。 */
 export function yamlToProxy(yaml: string): Record<string, unknown> {
-  const result: Record<string, unknown> = {}
-  const lines = yaml.split('\n')
-  let i = 0
-  while (i < lines.length) {
-    const line = lines[i]
-    const trimmed = line.trim()
-    if (!trimmed || trimmed.startsWith('#')) { i++; continue }
-
-    // 数组字段：下一行开始以 "- " 为前缀
-    const arrKeyMatch = trimmed.match(/^([\w][\w-]*)\s*:\s*$/)
-    if (arrKeyMatch && i + 1 < lines.length && lines[i + 1].trim().startsWith('- ')) {
-      const key = arrKeyMatch[1]
-      const items: string[] = []
-      i++
-      while (i < lines.length && lines[i].trim().startsWith('- ')) {
-        items.push(lines[i].trim().slice(2).trim())
-        i++
-      }
-      result[key] = items
-      continue
-    }
-
-    const kvMatch = trimmed.match(/^([\w][\w-]*)\s*:\s*(.*)$/)
-    if (kvMatch) {
-      const key = kvMatch[1]
-      let raw = kvMatch[2].trim()
-      if (raw === '' || raw === 'null') { result[key] = ''; i++; continue }
-      if (raw === 'true') { result[key] = true; i++; continue }
-      if (raw === 'false') { result[key] = false; i++; continue }
-      if (raw === '[]') { result[key] = []; i++; continue }
-      const num = Number(raw)
-      if (!isNaN(num) && raw !== '') { result[key] = num; i++; continue }
-      // 去掉首尾引号
-      if (
-        (raw.startsWith('"') && raw.endsWith('"')) ||
-        (raw.startsWith("'") && raw.endsWith("'"))
-      ) {
-        raw = raw.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\')
-      }
-      result[key] = raw
-    }
-    i++
+  let parsed: unknown
+  let lexical: unknown
+  try {
+    // Use JSON_SCHEMA for normal booleans/numbers, then restore lexical
+    // short-id values below because YAML's implicit numeric schema is too broad.
+    parsed = load(yaml, { schema: JSON_SCHEMA })
+    // js-yaml's standard schemas resolve an unquoted 0123 as a number. Parse a
+    // second safe lexical view so the short-id key can be restored exactly.
+    lexical = load(yaml, { schema: FAILSAFE_SCHEMA })
+  } catch {
+    throw new Error('invalid-proxy-yaml')
   }
-  return result
+  if (!isRecord(parsed)) throw new Error('proxy-yaml-must-be-object')
+  if (typeof parsed.type !== 'string' || !parsed.type.trim()) {
+    throw new Error('proxy-yaml-type-must-be-string')
+  }
+  return restoreShortIdStrings(parsed, lexical) as Record<string, unknown>
 }
 
 // ─────────────────────────────────────────────
@@ -130,6 +122,18 @@ export interface ProxyFormState {
   tls: boolean
   // vless
   flow: string
+  servername: string
+  clientFingerprint: string
+  encryption: string
+  realityEnabled: boolean
+  realityPublicKey: string
+  realityShortId: string
+  /** Reality 选项中未在普通表单展示的字段。 */
+  preservedRealityFields: Record<string, unknown>
+  /** 未在普通表单展示的 VLESS 字段，编辑时保留。 */
+  preservedFields: Record<string, unknown>
+  /** 用于在用户切换 VLESS transport 时清理旧 transport 的嵌套配置。 */
+  originalNetwork: string
   // trojan
   sni: string
   skipCertVerify: boolean
@@ -160,6 +164,15 @@ export const defaultProxyForm: ProxyFormState = {
   network: 'tcp',
   tls: false,
   flow: '',
+  servername: '',
+  clientFingerprint: '',
+  encryption: VLESS_DEFAULT_ENCRYPTION,
+  realityEnabled: false,
+  realityPublicKey: '',
+  realityShortId: '',
+  preservedRealityFields: {},
+  preservedFields: {},
+  originalNetwork: 'tcp',
   sni: '',
   skipCertVerify: false,
   version: '5',
@@ -172,9 +185,74 @@ export const defaultProxyForm: ProxyFormState = {
   rawYaml: '',
 }
 
+const VLESS_VISIBLE_KEYS = new Set([
+  'name',
+  'type',
+  'server',
+  'port',
+  'uuid',
+  'network',
+  'tls',
+  'flow',
+  'servername',
+  'client-fingerprint',
+  'encryption',
+  'reality-opts',
+  '__raw__',
+])
+
+const VLESS_TLS_KEYS = [
+  'servername',
+  'client-fingerprint',
+  'skip-cert-verify',
+  'alpn',
+  'fingerprint',
+  'name-cert-verify',
+  'certificate',
+  'private-key',
+  'reality-opts',
+  'shadow-tls-opts',
+  'restls-opts',
+  'jls-opts',
+  'ech-opts',
+  'tlsmirror-opts',
+]
+
+const VLESS_TRANSPORT_KEYS = [
+  'ws-opts',
+  'http-opts',
+  'h2-opts',
+  'grpc-opts',
+  'xhttp-opts',
+  'ws-headers',
+]
+
+function preservedVlessFields(node: ProxyNode): Record<string, unknown> {
+  const preserved: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(node)) {
+    if (!VLESS_VISIBLE_KEYS.has(key)) preserved[key] = cloneValue(value)
+  }
+  return preserved
+}
+
+function realityOptions(node: ProxyNode): Record<string, unknown> | null {
+  const value = node['reality-opts']
+  return isRecord(value) ? value : null
+}
+
+function preservedRealityFields(reality: Record<string, unknown> | null): Record<string, unknown> {
+  const preserved: Record<string, unknown> = {}
+  if (!reality) return preserved
+  for (const [key, value] of Object.entries(reality)) {
+    if (key !== 'public-key' && key !== 'short-id') preserved[key] = cloneValue(value)
+  }
+  return preserved
+}
+
 /** 将 ProxyNode 对象映射到表单字段 */
 export function proxyNodeToForm(node: ProxyNode): ProxyFormState {
   const type = (node.type as ProxyProtocol) || 'ss'
+  const reality = type === 'vless' ? realityOptions(node) : null
   return {
     name: node.name || '',
     type,
@@ -188,6 +266,15 @@ export function proxyNodeToForm(node: ProxyNode): ProxyFormState {
     network: String(node.network || 'tcp'),
     tls: Boolean(node.tls),
     flow: String(node.flow || ''),
+    servername: String(node.servername || ''),
+    clientFingerprint: String(node['client-fingerprint'] || ''),
+    encryption: String(node.encryption || VLESS_DEFAULT_ENCRYPTION),
+    realityEnabled: Boolean(reality && Object.keys(reality).length > 0),
+    realityPublicKey: String(reality?.['public-key'] ?? ''),
+    realityShortId: String(reality?.['short-id'] ?? ''),
+    preservedRealityFields: type === 'vless' ? preservedRealityFields(reality) : {},
+    preservedFields: type === 'vless' ? preservedVlessFields(node) : {},
+    originalNetwork: String(node.network || 'tcp'),
     sni: String(node.sni || ''),
     skipCertVerify: Boolean(node['skip-cert-verify']),
     version: String(node.version ?? '5'),
@@ -223,10 +310,28 @@ export function formToProxyNode(form: ProxyFormState): ProxyNode {
     if (form.tls) base.tls = true
     base.network = form.network
   } else if (form.type === 'vless') {
+    const preserved = cloneValue(form.preservedFields)
+    if (form.originalNetwork && form.originalNetwork !== form.network) {
+      for (const key of VLESS_TRANSPORT_KEYS) delete preserved[key]
+    }
+    if (!form.tls) {
+      for (const key of VLESS_TLS_KEYS) delete preserved[key]
+    }
+    for (const key of VLESS_VISIBLE_KEYS) delete preserved[key]
+    Object.assign(base, preserved)
     base.uuid = form.uuid
-    if (form.tls) base.tls = true
-    base.network = form.network
+    base.tls = Boolean(form.tls)
+    base.network = form.network || 'tcp'
     if (form.flow) base.flow = form.flow
+    base.encryption = form.encryption || VLESS_DEFAULT_ENCRYPTION
+    if (form.tls && form.servername) base.servername = form.servername
+    if (form.tls && form.clientFingerprint) base['client-fingerprint'] = form.clientFingerprint
+    if (form.tls && form.realityEnabled) {
+      const realityOpts = cloneValue(form.preservedRealityFields)
+      realityOpts['public-key'] = form.realityPublicKey
+      realityOpts['short-id'] = form.realityShortId
+      base['reality-opts'] = realityOpts
+    }
   } else if (form.type === 'trojan') {
     base.password = form.password
     if (form.sni) base.sni = form.sni
@@ -253,6 +358,22 @@ export function formToProxyNode(form: ProxyFormState): ProxyNode {
     if (form.tls) base.tls = true
   }
   return base as ProxyNode
+}
+
+export function validateProxyForm(form: ProxyFormState): VlessUriErrorCode | null {
+  if (form.type !== 'vless') return null
+  return validateVlessFields({
+    uuid: form.uuid,
+    server: form.server,
+    port: form.port,
+    tls: form.tls,
+    flow: form.flow,
+    encryption: form.encryption,
+    clientFingerprint: form.clientFingerprint,
+    realityEnabled: form.realityEnabled,
+    realityPublicKey: form.realityPublicKey,
+    realityShortId: form.realityShortId,
+  })
 }
 
 /** 生成不冲突的副本名称：`原名 副本`、`原名 副本 2` … */
