@@ -66,6 +66,7 @@ cd clash-config-store
 
 cp .env.example .env
 # 编辑 .env，至少修改 JWT_SECRET
+# 如需公网绝对订阅链接或托管规则集，请设置 BASE_URL=https://你的公开域名
 
 # 首次会拉取 Hub 镜像；./data 挂载为数据目录，首次启动会自动创建 SQLite
 
@@ -89,7 +90,13 @@ docker compose -f compose.local.yml up -d --build
 
 - Web UI: `http://localhost:26406`
 - API: `http://localhost:26406/api`
-- 公开订阅: `http://localhost:26406/sub/<token>`
+- 公开订阅（单体 Web UI）：`http://localhost:26406/sub/<token>`
+
+如果未设置 `BASE_URL`，API 返回的 `subscription_url` 是 `/sub/<token>` 相对路径，前端会使用当前页面的
+HTTP(S) origin（包括端口）生成可复制、展示和二维码分享的链接。因此开发前端通过 `http://localhost:5173`
+访问时，复制出的链接也会使用 `http://localhost:5173/sub/<token>`，并继续走 Vite 代理。
+如已有部署显式设置了 `BASE_URL=http://localhost:26406`，公网部署应移除该配置让前端使用当前 origin，或改成实际公开域名。
+托管规则集 URL 仍依赖公开的 `BASE_URL`；这是现有限制，本轮不会改写规则集或上游订阅源 URL。
 
 说明：
 
@@ -173,8 +180,14 @@ npm run dev
 | `DB_DSN`              | `data.db`                                 | SQLite 文件路径或 MySQL DSN                                        |
 | `JWT_SECRET`          | `please-change-this-secret-in-production` | JWT 密钥，生产环境必须修改                                               |
 | `JWT_EXPIRY_HOURS`    | `24`                                      | JWT 有效期（小时）                                                   |
-| `BASE_URL`            | `http://localhost:26406`                  | 用于生成订阅链接                                                      |
+| `BASE_URL`            | 未设置（可选）                              | 显式设置时生成带域名/端口/路径的绝对订阅链接；未设置时前端使用当前 origin；托管规则集仍需公开地址 |
 | `GEOIP_PATH`          | 空（自动探测）                                   | GeoLite2 数据库路径，用于地理限制                                         |
+
+`BASE_URL` 应填写部署者明确控制的 HTTP(S) 公共地址，例如
+`https://panel.example.com` 或 `https://panel.example.com/panel/`。显式配置会保留路径和端口；不会从
+`Host`、`Forwarded` 或 `X-Forwarded-*` 头推导地址。当前前端/API/公开路由没有自动子路径部署支持，不能从
+页面 `pathname` 猜测前缀；需要子路径时请显式配置并按现有部署方式配置反代。前后端应一起升级，因为 API
+在未配置 `BASE_URL` 时可能返回相对 `subscription_url`。
 
 ## GeoIP（可选）
 

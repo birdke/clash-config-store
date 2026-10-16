@@ -24,7 +24,7 @@ type Subscription struct {
 	ConfigTemplateID   *uint          `json:"config_template_id"`
 	RuleInsertMode     RuleInsertMode `gorm:"default:'prepend'" json:"rule_insert_mode"`
 	ProxyPrefixEnabled bool           `gorm:"default:true" json:"proxy_prefix_enabled"`
-	// 仅 JSON 输出，由 handler 根据 BASE_URL 填充
+	// 仅 JSON 输出，由 handler 根据 BASE_URL 填充；未显式配置时为 /sub/<token> 相对路径
 	SubscriptionURL string `gorm:"-" json:"subscription_url,omitempty"`
 	// 仅 JSON 输出，列表接口聚合 access_logs 条数
 	AccessLogCount int64 `gorm:"-" json:"access_log_count,omitempty"`

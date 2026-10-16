@@ -31,7 +31,9 @@ services:
       JWT_SECRET: ${JWT_SECRET:-please-set-a-strong-random-secret}
       JWT_EXPIRY_HOURS: ${JWT_EXPIRY_HOURS:-720}
       GEOIP_PATH: /data/geoip/GeoLite2-City.mmdb
-      BASE_URL: ${BASE_URL:-http://localhost:26406}
+      # Optional. Leave empty for relative /sub/<token> links resolved by the UI.
+      # Set this to the public origin when hosted rule-set URLs are needed.
+      BASE_URL: ${BASE_URL:-}
       TZ: ${TZ:-UTC}
     volumes:
       # 挂载目录而非单文件：宿主机不存在目标文件时 Docker 会误建「目录」，导致 SQLite 无法打开

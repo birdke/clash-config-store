@@ -24,6 +24,7 @@ import {
 } from 'lucide-react'
 import { dashboardApi } from '@/api/dashboard'
 import { providersApi } from '@/api/providers'
+import { subscriptionPublicUrl } from '@/lib/subscription-url'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -86,7 +87,7 @@ export function Dashboard() {
 
   // 复制订阅链接
   const handleCopyLink = (sub: SubscriptionHealth) => {
-    navigator.clipboard.writeText(sub.subscription_url).then(() => {
+    navigator.clipboard.writeText(subscriptionPublicUrl(sub)).then(() => {
       setCopiedId(sub.id)
       toast.success(t('subscriptions.copySuccess'))
       setTimeout(() => setCopiedId(null), 2000)

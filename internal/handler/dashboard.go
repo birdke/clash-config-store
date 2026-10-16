@@ -25,6 +25,7 @@ type ProviderStatus struct {
 type SubscriptionHealth struct {
 	ID                uint       `json:"id"`
 	Name              string     `json:"name"`
+	Token             string     `json:"token"`
 	SubscriptionURL   string     `json:"subscription_url"`
 	TokenExpiredAt    *time.Time `json:"token_expired_at"`
 	TokenExpired      bool       `json:"token_expired"`
@@ -82,6 +83,7 @@ func GetDashboardStats(c *gin.Context) {
 		h := SubscriptionHealth{
 			ID:                sub.ID,
 			Name:              sub.Name,
+			Token:             sub.Token,
 			SubscriptionURL:   "",
 			TokenExpiredAt:    sub.TokenExpiredAt,
 			TokenExpired:      sub.TokenExpiredAt != nil && now.After(*sub.TokenExpiredAt),

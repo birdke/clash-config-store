@@ -122,7 +122,7 @@ export interface Subscription {
   user_id: number
   name: string
   token: string
-  /** 后端根据 BASE_URL 拼好的对外订阅链接 */
+  /** 后端返回的对外订阅链接；未显式配置 BASE_URL 时为 /sub/<token> 相对路径 */
   subscription_url?: string
   /** 列表接口聚合的访问日志条数 */
   access_log_count?: number
@@ -173,7 +173,9 @@ export interface ProviderStatus {
 export interface SubscriptionHealth {
   id: number
   name: string
-  subscription_url: string
+  token: string
+  /** 可为 /sub/<token> 相对路径，前端展示、复制和二维码统一解析 */
+  subscription_url?: string
   token_expired_at?: string
   token_expired: boolean
   days_until_expiry?: number
